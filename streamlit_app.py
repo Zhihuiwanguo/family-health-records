@@ -1,6 +1,15 @@
 import streamlit as st
 from app.auth import protect_page
-from app.pages import dashboard, persons, documents, ai_extract, issues, timeline, doctor_summary
+from app.pages import (
+    ai_extract,
+    dashboard,
+    doctor_summary,
+    documents,
+    issues,
+    persons,
+    system_diagnostics,
+    timeline,
+)
 
 st.set_page_config(page_title="家庭健康档案工具", layout="wide")
 protect_page()
@@ -10,7 +19,7 @@ st.caption("仅用于健康资料整理，不提供医学诊断，不替代医�
 
 page = st.sidebar.radio(
     "导航",
-    ["总览", "人员档案", "报告登记", "AI识别中心", "健康问题追踪", "时间轴", "医生摘要"],
+    ["总览", "人员档案", "报告登记", "AI识别中心", "健康问题追踪", "时间轴", "医生摘要", "系统诊断"],
 )
 
 if page == "总览":
@@ -25,5 +34,7 @@ elif page == "健康问题追踪":
     issues.render()
 elif page == "时间轴":
     timeline.render()
+elif page == "系统诊断":
+    system_diagnostics.render()
 else:
     doctor_summary.render()
