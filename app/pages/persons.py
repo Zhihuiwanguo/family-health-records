@@ -1,5 +1,6 @@
 import streamlit as st
 from datetime import date
+from postgrest.exceptions import APIError
 from app import db
 
 
@@ -17,8 +18,18 @@ def render():
             key="person_birth_date",
         )
         submit = st.form_submit_button("保存")
-        if submit and name:
+        if submit:
+            if not name.strip():
+                st.error("姓名不能为空。")
+                return
             birth_date_value = birth_date.isoformat() if birth_date else None
-            db.insert("persons", {"name": name, "relation": relation, "dob": birth_date_value})
-            st.success("已保存")
+            try:
+                db.insert("persons", {"name": name.strip(), "relation": relation, "dob": birth_date_value})
+                st.success("已保存")
+            except APIError as exc:
+                st.error("新增人员失败，请检查 persons 表字段是否包含 name、relation、dob。")
+                st.exception(exc)
+            except Exception as exc:
+                st.error("新增人员失败，请检查 persons 表字段是否包含 name、relation、dob。")
+                st.exception(exc)
     st.dataframe(db.fetch("persons"))

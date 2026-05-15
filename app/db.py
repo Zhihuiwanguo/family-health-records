@@ -26,15 +26,39 @@ def _safe_secret(key: str) -> str | None:
         return None
 
 
+def _sanitize_supabase_url(url: str) -> str:
+    clean = url.strip().rstrip("/")
+    rest_suffix = "/rest/v1"
+    idx = clean.find(rest_suffix)
+    if idx != -1:
+        clean = clean[:idx].rstrip("/")
+    return clean
+
+
+def get_supabase_config() -> dict[str, str | bool | None]:
+    raw_url = _safe_secret("SUPABASE_URL")
+    legacy_key = _safe_secret("SUPABASE_KEY")
+    service_role_key = _safe_secret("SUPABASE_SERVICE_ROLE_KEY") or legacy_key
+    sanitized_url = _sanitize_supabase_url(raw_url) if raw_url else None
+
+    return {
+        "raw_url": raw_url,
+        "sanitized_url": sanitized_url,
+        "service_role_key": service_role_key,
+        "used_legacy_key": bool(legacy_key and not _safe_secret("SUPABASE_SERVICE_ROLE_KEY")),
+    }
+
+
 def _get_supabase() -> Client | None:
-    url = _safe_secret("SUPABASE_URL")
-    service_role_key = _safe_secret("SUPABASE_SERVICE_ROLE_KEY")
+    config = get_supabase_config()
+    url = config["sanitized_url"]
+    service_role_key = config["service_role_key"]
 
     if not url:
         _set_db_error("缺少 SUPABASE_URL，请在 Streamlit Secrets 中配置。")
         return None
     if not service_role_key:
-        _set_db_error("缺少 SUPABASE_SERVICE_ROLE_KEY，请在 Streamlit Secrets 中配置。")
+        _set_db_error("缺少 SUPABASE_SERVICE_ROLE_KEY（或旧变量 SUPABASE_KEY），请在 Streamlit Secrets 中配置。")
         return None
 
     try:
@@ -75,7 +99,16 @@ def insert(table: str, payload: dict[str, Any]):
     client = _get_supabase()
     if client is None:
         return None
-    return client.table(table).insert(payload).execute()
+    try:
+        result = client.table(table).insert(payload).execute()
+        _clear_db_error()
+        return result
+    except APIError as exc:
+        _set_db_error(f"写入表 {table} 失败: {exc}")
+        raise
+    except Exception as exc:
+        _set_db_error(f"写入表 {table} 异常: {exc}")
+        raise
 
 
 def upsert(table: str, payload: dict[str, Any], on_conflict: str | None = None):
