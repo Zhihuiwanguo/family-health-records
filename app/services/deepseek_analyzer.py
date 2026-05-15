@@ -23,7 +23,8 @@ def _empty_result() -> dict[str, Any]:
         'follow_up_suggestion': '',
         'health_event_title': '',
         'health_event_summary': '',
-        'structured_items': [],
+        'observations': [],
+        'findings': [],
     }
 
 
@@ -32,7 +33,7 @@ def _normalize_result(raw: dict[str, Any], report_type: str, file_name: str) -> 
     result.update(raw or {})
     result['report_type'] = result.get('report_type') or report_type
     result['health_event_title'] = result.get('health_event_title') or f"{result['report_type']} - {file_name}"
-    for key in ['key_findings', 'suggested_department', 'doctor_questions', 'structured_items', 'abnormal_findings']:
+    for key in ['key_findings', 'suggested_department', 'doctor_questions', 'abnormal_findings', 'observations', 'findings']:
         if not isinstance(result.get(key), list):
             result[key] = [str(result[key])] if result.get(key) else []
     return result
@@ -72,10 +73,9 @@ def analyze_text(ocr_text: str, file_name: str, person: dict[str, Any], report_t
             {
                 'role': 'user',
                 'content': (
-                    '请严格输出以下字段：report_type, report_date, patient_name, summary_for_family, key_findings, '
-                    'abnormal_findings[{item,original_text,value,reference_range,interpretation,risk_level,suggested_action}], '
-                    'risk_level_overall, suggested_department, doctor_questions, follow_up_suggestion, health_event_title, '
-                    'health_event_summary, structured_items。\n'
+                    '请严格输出 JSON 且包含字段：report_type, report_date, patient_name, summary_for_family, key_findings, abnormal_findings, observations, findings, risk_level_overall, suggested_department, doctor_questions, follow_up_suggestion, health_event_title, health_event_summary。\n'
+                    'observations 必须覆盖报告中的全部检测项目（含正常项），每项包含 section_name,item_name,item_key,result_text,result_value,result_unit,reference_range,reference_low,reference_high,abnormal_flag,abnormal_direction,risk_level,interpretation,suggested_action,source_text,confidence。\n'
+                    'findings 用于影像/描述性发现，包含 body_part,finding_name,finding_description,measurement_text,size_value,size_unit,risk_level,suggested_department,suggested_action,source_text,confidence。无法确定数值填 null，不要编造。\n'
                     f'{prompt_focus}\n'
                     f'人员信息: {json.dumps(person, ensure_ascii=False)}\n'
                     f'文件名: {file_name}\n'
