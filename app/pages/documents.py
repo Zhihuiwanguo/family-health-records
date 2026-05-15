@@ -21,7 +21,13 @@ def render():
             "notes": st.text_area("备注"),
             "is_critical": st.checkbox("是否关键报告"),
         }
+        st.caption("即将写入 documents 表的 payload：")
+        st.json(payload)
         if st.form_submit_button("登记") and payload["person_id"]:
-            db.insert("documents", payload)
-            st.success("登记成功")
+            try:
+                db.insert("documents", payload)
+                st.success("登记成功")
+            except Exception as e:
+                st.error("新增报告失败，请检查 documents 表字段是否与当前 payload 一致。")
+                st.exception(e)
     st.dataframe(db.fetch("documents"))
