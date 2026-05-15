@@ -2,18 +2,68 @@
 
 > 仅用于健康资料整理，不提供医学诊断，不替代医生面诊。
 
-## V2 核心闭环
+## 推荐流程（V2 半自动导入）
 
-V2 已支持最小可用链路：
+1. 用户将体检报告 / 检查报告（图片、PDF）发给 ChatGPT。
+2. ChatGPT 输出标准 JSON 或 CSV/Excel。
+3. 用户在 **V2 数据导入** 页面粘贴 JSON，或上传 CSV/Excel。
+4. 系统导入后生成健康档案，支持时间轴与指标趋势对比。
 
-1. 上传 PDF / 图片
-2. 文件写入 Supabase Storage（bucket: `health-files`）
-3. 抽取 OCR 文本（PDF 文本直提）
-4. 调用 DeepSeek 进行结构化解读
-5. 页面展示 OCR 原文 + AI 结果
-6. 用户人工点击“确认入档”
-7. 写入家庭健康档案（`health_files` + `health_events`）
-8. 可按人员查看健康时间轴
+## JSON 导入格式
+
+```json
+{
+  "file_info": {
+    "person_name": "父亲",
+    "report_date": "2026-05-05",
+    "report_type": "胸部CT",
+    "hospital_name": "",
+    "file_name": "",
+    "summary": "",
+    "risk_level": "",
+    "suggested_department": [],
+    "doctor_questions": [],
+    "follow_up_suggestion": ""
+  },
+  "observations": [],
+  "findings": []
+}
+```
+
+- `file_info`：写入 `health_files` 与 `health_events`。
+- `observations`：写入 `health_observations`。
+- `findings`：写入 `health_findings`。
+- 若同 `person_id + report_date + file_name` 已存在，可选择覆盖；覆盖会先删除对应 `file_id` 的旧 observations/findings 后重写。
+
+## CSV/Excel 模板字段
+
+### 检测指标（observations）
+- `person_name`
+- `report_date`
+- `report_type`
+- `section_name`
+- `item_name`
+- `item_key`
+- `result_text`
+- `result_value`
+- `result_unit`
+- `reference_range`
+- `abnormal_flag`
+- `interpretation`
+- `source_text`
+
+### 影像发现（findings）
+- `person_name`
+- `report_date`
+- `report_type`
+- `body_part`
+- `finding_name`
+- `finding_description`
+- `measurement_text`
+- `risk_level`
+- `suggested_department`
+- `suggested_action`
+- `source_text`
 
 ## Streamlit Secrets 示例
 
@@ -27,6 +77,8 @@ DEEPSEEK_API_KEY = "your_deepseek_api_key"
 
 1. 在 Supabase SQL Editor 执行：
    - `supabase/migrations/20260515_v2_health_archive.sql`
+   - `supabase/migrations/20260516_v22_health_observations.sql`
+   - `supabase/migrations/20260516_v24_manual_import.sql`
 2. 在 Supabase Storage 创建 bucket：
    - `health-files`
 3. 重启 Streamlit Cloud 应用
@@ -37,9 +89,3 @@ DEEPSEEK_API_KEY = "your_deepseek_api_key"
 pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
-
-## 说明
-
-- V2 首版图片 OCR 先返回占位状态（`image_need_ocr`）并在页面提示“图片OCR待接入”。
-- 扫描版 PDF（提取不到文本）会标记 `scanned_pdf_need_ocr`。
-- AI 结果不会自动入档，必须人工确认。

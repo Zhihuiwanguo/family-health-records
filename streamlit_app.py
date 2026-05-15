@@ -8,6 +8,7 @@ from app.auth import protect_page
 PAGES = {
     "V2 上传分析": "app.pages.v2_upload",
     "V2 健康时间轴": "app.pages.v2_timeline",
+    "V2 数据导入": "app.pages.v2_import",
     "V2 指标趋势": "app.pages.v2_trends",
     "系统诊断": "app.pages.system_diagnosis",
 }
