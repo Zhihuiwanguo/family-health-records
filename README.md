@@ -1,14 +1,26 @@
-# 家庭健康档案工具（Streamlit + Supabase + DeepSeek）
+# 家庭健康档案工具云端 MVP（Streamlit Cloud + Supabase + Google Drive 文件链接 + DeepSeek API）
 
 > 仅用于健康资料整理，不提供医学诊断，不替代医生面诊、影像判读和治疗建议。
 
-## 1) 创建 Supabase 项目
+## 一、项目定位（云端 MVP）
+本项目采用以下技术路线：
+- **前端/应用层**：Streamlit Cloud 托管的 Streamlit 应用
+- **结构化数据存储**：Supabase（PostgreSQL）
+- **原始文件管理**：Google Drive 文件链接（系统仅保存链接与元数据）
+- **AI 结构化识别**：DeepSeek API（通过兼容 OpenAI SDK 的方式调用）
+
+该路线适合家庭成员体检/门诊资料的**轻量化云端管理**：
+- 报告原文放在 Google Drive；
+- 关键字段写入 Supabase；
+- 通过 Streamlit 页面进行录入、审核和时间线查看。
+
+## 二、创建 Supabase 项目
 1. 登录 Supabase，创建新项目。
 2. 在 **Project Settings -> API** 获取：
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
 
-## 2) 执行建表 SQL
+## 三、执行建表 SQL
 在 Supabase SQL Editor 执行以下脚本：
 
 ```sql
@@ -124,8 +136,8 @@ create table if not exists timeline_events (
 );
 ```
 
-## 3) 配置 Streamlit Secrets
-在 `.streamlit/secrets.toml`：
+## 四、配置 Secrets（本地与云端共用）
+在 `.streamlit/secrets.toml` 配置：
 
 ```toml
 APP_PASSWORD = "your-strong-password"
@@ -134,19 +146,25 @@ SUPABASE_URL = "https://xxx.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY = "your-service-role-key"
 ```
 
-## 4) 本地运行
+## 五、本地开发运行（不与云端部署冲突）
+本地开发与云端部署使用同一套代码和同一组 Secrets 键名，仅运行入口不同：
+
 ```bash
 pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-## 5) 部署到 Streamlit Community Cloud
-1. 代码推送到 GitHub 私有仓库（不要上传真实报告文件）。
-2. 在 Streamlit Cloud 新建 App，选择该仓库和 `streamlit_app.py`。
-3. 在 Secrets 中填入上述 4 个变量。
-4. 部署后即可访问。
+本地建议：
+- 使用测试库或测试 schema，避免影响线上数据；
+- 继续使用 Google Drive 链接字段（`drive_url`），不要求本地存储原始报告。
 
-## 6) 隐私与医疗免责声明
+## 六、部署到 Streamlit Community Cloud
+1. 代码推送到 GitHub 仓库（不要上传真实报告文件）。
+2. 在 Streamlit Cloud 新建 App，入口选择 `streamlit_app.py`。
+3. 在 Cloud 的 Secrets 中填入与本地相同的 4 个变量。
+4. 部署后即可在线访问。
+
+## 七、隐私与医疗免责声明
 - 默认会对姓名、手机号、身份证号、门诊号、住院号、检查号、影像号做脱敏。
 - 调用 DeepSeek 前会明确提示：报告文本将发送到 DeepSeek API 用于结构化识别。
 - AI 识别结果必须经人工确认后写入结构化表。
