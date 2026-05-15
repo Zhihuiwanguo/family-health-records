@@ -136,15 +136,19 @@ create table if not exists timeline_events (
 );
 ```
 
-## 四、配置 Secrets（本地与云端共用）
-在 `.streamlit/secrets.toml` 配置：
+## 四、云端部署与 Secrets 配置
+在 Streamlit Cloud 的 App `Secrets` 中配置（本地 `.streamlit/secrets.toml` 可使用相同键名）：
 
 ```toml
-APP_PASSWORD = "your-strong-password"
-DEEPSEEK_API_KEY = "sk-..."
-SUPABASE_URL = "https://xxx.supabase.co"
-SUPABASE_SERVICE_ROLE_KEY = "your-service-role-key"
+SUPABASE_URL = "https://xxxx.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "your_service_role_key"
+DEEPSEEK_API_KEY = "your_deepseek_api_key"
 ```
+
+注意事项：
+- `SUPABASE_URL` 必须是项目根地址，不要带 `/rest/v1`。
+- `SUPABASE_SERVICE_ROLE_KEY`（或兼容旧键名 `SUPABASE_KEY`）是敏感信息，不要提交到 GitHub。
+- `supabase/migrations/20260515_fix_persons_documents_schema.sql` 需要复制到 Supabase SQL Editor 手动执行，本仓库不会自动改库。
 
 ## 五、本地开发运行（不与云端部署冲突）
 本地开发与云端部署使用同一套代码和同一组 Secrets 键名，仅运行入口不同：
