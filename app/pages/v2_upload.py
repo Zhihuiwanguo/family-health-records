@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
+from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 
@@ -58,24 +60,39 @@ def render() -> None:
     if st.button('开始上传并分析', type='primary'):
         try:
             file_bytes = uploaded.read()
-            ext = uploaded.name.lower().rsplit('.', 1)[-1]
-            path = f"{person['id']}/{uploaded.name}"
+            original_name = uploaded.name
+            ext = Path(original_name).suffix.lower().lstrip('.')
+            unique_id = uuid4().hex
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            unique_filename = f"{timestamp}_{unique_id}.{ext}" if ext else f"{timestamp}_{unique_id}"
+            path = f"{person['id']}/{unique_filename}"
+            content_type = uploaded.type or 'application/octet-stream'
 
             supabase = get_supabase()
             try:
-                supabase.storage.from_('health-files').upload(path, file_bytes, {'content-type': uploaded.type})
+                supabase.storage.from_('health-files').upload(
+                    path,
+                    file_bytes,
+                    {
+                        'content-type': content_type,
+                        'upsert': 'false',
+                    },
+                )
             except Exception as exc:
-                st.error('上传 Supabase Storage 失败，请确认 bucket `health-files` 已创建。')
-                st.exception(exc)
+                if 'duplicate' in str(exc).lower() or 'already exists' in str(exc).lower():
+                    st.error('文件路径重复，请重新上传或刷新页面')
+                else:
+                    st.error('上传 Supabase Storage 失败，请确认 bucket `health-files` 已创建。')
+                    st.exception(exc)
                 return
 
-            ocr_text, ocr_status = extract_text(file_bytes, uploaded.name)
+            ocr_text, ocr_status = extract_text(file_bytes, original_name)
             if ocr_status == 'image_need_ocr':
                 st.warning('图片OCR待接入，当前仅支持 PDF 文本直提。')
 
             file_row = {
                 'person_id': person['id'],
-                'file_name': uploaded.name,
+                'file_name': original_name,
                 'file_type': ext,
                 'storage_path': path,
                 'ocr_text': ocr_text,
@@ -85,7 +102,7 @@ def render() -> None:
             created = db.insert('health_files', file_row)
             health_file = (created.data or [])[0] if created else None
 
-            ai_result = analyze_text(ocr_text, uploaded.name, person)
+            ai_result = analyze_text(ocr_text, original_name, person)
             if 'error' in ai_result:
                 st.error(ai_result['error'])
                 db.update('health_files', health_file['id'], {'ai_status': 'error', 'ai_summary': ai_result['error'], 'ai_json': ai_result})
@@ -101,7 +118,7 @@ def render() -> None:
                 )
 
             st.subheader('待确认入档结果')
-            st.write(f"文件名：{uploaded.name}")
+            st.write(f"文件名：{original_name}")
             st.text_area('OCR 原文', ocr_text or '(空)', height=220)
             st.write('AI 摘要：', ai_result.get('summary') if isinstance(ai_result, dict) else '')
             st.json(ai_result)
@@ -119,7 +136,7 @@ def render() -> None:
                         'file_id': health_file['id'],
                         'event_date': event_date,
                         'event_type': ai_result.get('report_type') or 'medical_report',
-                        'title': ai_result.get('report_type') or uploaded.name,
+                        'title': ai_result.get('report_type') or original_name,
                         'summary': ai_result.get('summary') or '',
                         'risk_level': ai_result.get('risk_level') or 'unknown',
                         'department': ai_result.get('suggested_department') or None,
