@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from io import BytesIO
 
@@ -19,6 +20,75 @@ FINDING_COLUMNS = [
     'person_name', 'report_date', 'report_type', 'body_part', 'finding_name', 'finding_description',
     'measurement_text', 'risk_level', 'suggested_department', 'suggested_action', 'source_text',
 ]
+
+ALLOWED_FIELDS = {
+    'health_files': {
+        'person_id', 'file_name', 'file_type', 'upload_time', 'ai_summary', 'ai_json', 'raw_json',
+        'confirmed', 'confirmed_at', 'ai_status',
+    },
+    'health_events': {
+        'person_id', 'file_id', 'event_date', 'event_type', 'title', 'summary', 'risk_level',
+        'department', 'confirmed', 'ai_json', 'raw_json',
+    },
+    'health_observations': {
+        'person_id', 'file_id', 'report_date', 'report_type', 'section_name', 'item_name', 'item_key',
+        'result_text', 'result_value', 'result_unit', 'reference_range', 'abnormal_flag',
+        'interpretation', 'source_text', 'person_name', 'source_file', 'ai_json', 'raw_json',
+    },
+    'health_findings': {
+        'person_id', 'file_id', 'report_date', 'report_type', 'body_part', 'finding_name',
+        'finding_description', 'measurement_text', 'risk_level', 'suggested_department',
+        'suggested_action', 'source_text', 'person_name', 'source_file', 'ai_json', 'raw_json',
+    },
+}
+
+
+def _extract_missing_column(err: Exception) -> str | None:
+    msg = str(err)
+    m = re.search(r"Could not find the '([^']+)' column", msg)
+    return m.group(1) if m else None
+
+
+def _prepare_record(table: str, payload: dict, json_holder: str = 'ai_json') -> dict:
+    allowed = ALLOWED_FIELDS[table]
+    record = {k: v for k, v in payload.items() if k in allowed}
+    extra = {k: v for k, v in payload.items() if k not in allowed}
+    if extra and json_holder in allowed:
+        existed = record.get(json_holder)
+        if isinstance(existed, dict):
+            record[json_holder] = {**existed, '_extra_fields': extra}
+        elif existed:
+            record[json_holder] = {'_original': existed, '_extra_fields': extra}
+        else:
+            record[json_holder] = {'_extra_fields': extra}
+    elif extra and 'raw_json' in allowed and 'raw_json' not in record:
+        record['raw_json'] = {'_extra_fields': extra}
+    return record
+
+
+def _safe_insert(sb, table: str, payload: dict | list[dict]):
+    rows = payload if isinstance(payload, list) else [payload]
+    rows = [_prepare_record(table, r) for r in rows]
+    while True:
+        try:
+            return sb.table(table).insert(rows if isinstance(payload, list) else rows[0]).execute()
+        except Exception as exc:
+            missing_col = _extract_missing_column(exc)
+            if not missing_col:
+                raise
+            for i, r in enumerate(rows):
+                if missing_col in r:
+                    removed = r.pop(missing_col)
+                    holder = 'ai_json' if 'ai_json' in ALLOWED_FIELDS[table] else 'raw_json'
+                    if holder in ALLOWED_FIELDS[table]:
+                        current = r.get(holder)
+                        if not isinstance(current, dict):
+                            current = {'_original': current} if current else {}
+                        dropped = current.get('_dropped_missing_columns', {})
+                        dropped[missing_col] = removed
+                        current['_dropped_missing_columns'] = dropped
+                        r[holder] = current
+                    rows[i] = r
 
 
 def _load_persons() -> tuple[list[dict], dict[str, dict], dict[str, str]]:
@@ -49,7 +119,7 @@ def _insert_with_overwrite(sb, person_id: str, report_date: str, file_name: str,
         sb.table('health_findings').delete().eq('file_id', file_id).execute()
         sb.table('health_events').delete().eq('file_id', file_id).execute()
     else:
-        inserted = sb.table('health_files').insert({
+        inserted = _safe_insert(sb, 'health_files', {
             'person_id': person_id,
             'file_name': file_name,
             'file_type': report_type,
@@ -59,7 +129,7 @@ def _insert_with_overwrite(sb, person_id: str, report_date: str, file_name: str,
             'confirmed': True,
             'confirmed_at': datetime.utcnow().isoformat(),
             'ai_status': 'done',
-        }).execute().data or []
+        }).data or []
         file_id = inserted[0]['id'] if inserted else None
 
     if not file_id:
@@ -71,7 +141,7 @@ def _insert_with_overwrite(sb, person_id: str, report_date: str, file_name: str,
             'confirmed': True, 'confirmed_at': datetime.utcnow().isoformat(), 'ai_status': 'done',
         }).eq('id', file_id).execute()
 
-    sb.table('health_events').insert({
+    _safe_insert(sb, 'health_events', {
         'person_id': person_id,
         'file_id': file_id,
         'event_date': report_date,
@@ -81,12 +151,12 @@ def _insert_with_overwrite(sb, person_id: str, report_date: str, file_name: str,
         'risk_level': risk_level,
         'department': department,
         'confirmed': True,
-    }).execute()
+    })
 
     if observations:
-        sb.table('health_observations').insert([{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in observations]).execute()
+        _safe_insert(sb, 'health_observations', [{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in observations])
     if findings:
-        sb.table('health_findings').insert([{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in findings]).execute()
+        _safe_insert(sb, 'health_findings', [{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in findings])
 
 
 def render() -> None:
@@ -111,9 +181,22 @@ def render() -> None:
             payload = json.loads(json_text)
             file_info = payload.get('file_info') or {}
             st.session_state['v2_json_payload'] = payload
-            st.dataframe(pd.DataFrame([file_info]), use_container_width=True)
-            st.dataframe(pd.DataFrame(payload.get('observations') or []), use_container_width=True)
-            st.dataframe(pd.DataFrame(payload.get('findings') or []), use_container_width=True)
+            file_preview = _prepare_record('health_files', {
+                'person_id': selected_person['id'],
+                'file_name': file_info.get('file_name'),
+                'file_type': file_info.get('report_type'),
+                'upload_time': file_info.get('report_date'),
+                'ai_summary': file_info.get('summary'),
+                'ai_json': file_info,
+            })
+            obs_preview = [_prepare_record('health_observations', x) for x in (payload.get('observations') or [])]
+            finding_preview = [_prepare_record('health_findings', x) for x in (payload.get('findings') or [])]
+            st.caption('health_files 入库预览（已按白名单过滤，多余字段保存到 ai_json/raw_json）')
+            st.dataframe(pd.DataFrame([file_preview]), use_container_width=True)
+            st.caption('health_observations 入库预览')
+            st.dataframe(pd.DataFrame(obs_preview), use_container_width=True)
+            st.caption('health_findings 入库预览')
+            st.dataframe(pd.DataFrame(finding_preview), use_container_width=True)
         except Exception as exc:
             st.error(f'JSON 解析失败: {exc}')
 
