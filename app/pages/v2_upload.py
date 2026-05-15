@@ -101,51 +101,114 @@ def render() -> None:
             }
             created = db.insert('health_files', file_row)
             health_file = (created.data or [])[0] if created else None
+            if not health_file:
+                st.error('创建 health_files 记录失败。')
+                return
 
             ai_result = analyze_text(ocr_text, original_name, person)
             if 'error' in ai_result:
                 st.error(ai_result['error'])
-                db.update('health_files', health_file['id'], {'ai_status': 'error', 'ai_summary': ai_result['error'], 'ai_json': ai_result})
+                try:
+                    db.update('health_files', health_file['id'], {'ai_status': 'error', 'ai_summary': ai_result.get('summary') or ai_result['error'], 'ai_json': ai_result})
+                except Exception as exc:
+                    st.error(f'更新 AI 状态失败: {exc}')
             else:
-                db.update(
-                    'health_files',
-                    health_file['id'],
-                    {
-                        'ai_status': 'done',
-                        'ai_summary': ai_result.get('summary'),
-                        'ai_json': ai_result,
-                    },
-                )
-
-            st.subheader('待确认入档结果')
-            st.write(f"文件名：{original_name}")
-            st.text_area('OCR 原文', ocr_text or '(空)', height=220)
-            st.write('AI 摘要：', ai_result.get('summary') if isinstance(ai_result, dict) else '')
-            st.json(ai_result)
-
-            if st.button('确认入档'):
                 try:
                     db.update(
                         'health_files',
                         health_file['id'],
-                        {'confirmed': True, 'confirmed_at': __import__('datetime').datetime.utcnow().isoformat()},
+                        {
+                            'ai_status': 'done',
+                            'ai_summary': ai_result.get('summary'),
+                            'ai_json': ai_result,
+                        },
                     )
-                    event_date = ai_result.get('report_date') or date.today().isoformat()
+                except Exception as exc:
+                    st.error(f'保存 AI 结果失败: {exc}')
+
+            st.session_state['v2_upload_draft'] = {
+                'health_file_id': health_file['id'],
+                'person_id': person['id'],
+                'file_name': original_name,
+                'ocr_text': ocr_text or '',
+                'ai_result': ai_result if isinstance(ai_result, dict) else {},
+            }
+            st.success('上传并分析完成，请确认入档。')
+        except Exception as exc:
+            st.error('处理失败，请查看错误详情。')
+            st.exception(exc)
+
+    draft = st.session_state.get('v2_upload_draft')
+    if not draft:
+        return
+
+    st.subheader('待确认入档结果')
+    st.write(f"文件名：{draft.get('file_name')}")
+    st.text_area('OCR 原文', draft.get('ocr_text', ''), height=220, disabled=True)
+    ai_data = draft.get('ai_result', {})
+    with st.form('v2_confirm_archive_form'):
+        title = st.text_input('标题', value=ai_data.get('title') or draft.get('file_name') or '')
+        summary = st.text_area('AI 摘要', value=ai_data.get('summary') or '', height=100)
+        abnormal_findings = st.text_area(
+            '异常发现（每行一条）',
+            value='\n'.join(ai_data.get('abnormal_findings') or []),
+            height=100,
+        )
+        risk_level = st.selectbox('风险等级', ['low', 'medium', 'high', 'critical', 'unknown'], index=['low', 'medium', 'high', 'critical', 'unknown'].index((ai_data.get('risk_level') or 'unknown') if (ai_data.get('risk_level') or 'unknown') in ['low', 'medium', 'high', 'critical', 'unknown'] else 'unknown'))
+        suggested_department = st.text_input('建议科室', value=ai_data.get('suggested_department') or '')
+        doctor_questions = st.text_area(
+            '医生问题清单（每行一条）',
+            value='\n'.join(ai_data.get('doctor_questions') or []),
+            height=120,
+        )
+        follow_up_suggestion = st.text_area('复查建议', value=ai_data.get('follow_up_suggestion') or '', height=100)
+        report_type = st.text_input('报告类型', value=ai_data.get('report_type') or 'medical_report')
+        report_date = st.text_input('报告日期 (YYYY-MM-DD)', value=ai_data.get('report_date') or date.today().isoformat())
+
+        if st.form_submit_button('确认入档', type='primary'):
+            try:
+                abnormal_list = [x.strip() for x in abnormal_findings.splitlines() if x.strip()]
+                doctor_q_list = [x.strip() for x in doctor_questions.splitlines() if x.strip()]
+                final_ai_json = {
+                    **ai_data,
+                    'title': title,
+                    'summary': summary,
+                    'abnormal_findings': abnormal_list,
+                    'risk_level': risk_level,
+                    'suggested_department': suggested_department,
+                    'doctor_questions': doctor_q_list,
+                    'follow_up_suggestion': follow_up_suggestion,
+                    'report_type': report_type,
+                    'report_date': report_date,
+                }
+                db.update(
+                    'health_files',
+                    draft['health_file_id'],
+                    {
+                        'confirmed': True,
+                        'confirmed_at': datetime.utcnow().isoformat(),
+                        'ai_summary': summary,
+                        'ai_json': final_ai_json,
+                        'ai_status': 'done',
+                    },
+                )
+                try:
+                    event_date = report_date or date.today().isoformat()
                     event_payload = {
-                        'person_id': person['id'],
-                        'file_id': health_file['id'],
+                        'person_id': draft['person_id'],
+                        'file_id': draft['health_file_id'],
                         'event_date': event_date,
-                        'event_type': ai_result.get('report_type') or 'medical_report',
-                        'title': ai_result.get('report_type') or original_name,
-                        'summary': ai_result.get('summary') or '',
-                        'risk_level': ai_result.get('risk_level') or 'unknown',
-                        'department': ai_result.get('suggested_department') or None,
+                        'event_type': report_type or 'medical_report',
+                        'title': title or draft['file_name'],
+                        'summary': summary or '',
+                        'risk_level': risk_level or 'unknown',
+                        'department': suggested_department or None,
                         'confirmed': True,
                     }
                     db.insert('health_events', event_payload)
                     st.success('已保存到家庭健康档案')
+                    st.session_state.pop('v2_upload_draft', None)
                 except Exception as exc:
-                    st.error(f'确认入档失败: {exc}')
-        except Exception as exc:
-            st.error('处理失败，请查看错误详情。')
-            st.exception(exc)
+                    st.error(f'写入 health_events 失败: {exc}')
+            except Exception as exc:
+                st.error(f'确认入档失败: {exc}')
