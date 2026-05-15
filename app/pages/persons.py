@@ -23,13 +23,19 @@ def render():
                 st.error("姓名不能为空。")
                 return
             birth_date_value = birth_date.isoformat() if birth_date else None
+            payload = {
+                "full_name": name.strip(),
+                "name": name.strip(),
+                "relation": relation.strip() if relation else None,
+                "dob": birth_date_value,
+            }
             try:
-                db.insert("persons", {"name": name.strip(), "relation": relation, "dob": birth_date_value})
+                db.insert("persons", payload)
                 st.success("已保存")
             except APIError as exc:
-                st.error("新增人员失败，请检查 persons 表字段是否包含 name、relation、dob。")
+                st.error("新增人员失败，请检查 persons 表字段并查看下方异常详情。")
                 st.exception(exc)
             except Exception as exc:
-                st.error("新增人员失败，请检查 persons 表字段是否包含 name、relation、dob。")
+                st.error("新增人员失败，请检查 persons 表字段并查看下方异常详情。")
                 st.exception(exc)
     st.dataframe(db.fetch("persons"))
