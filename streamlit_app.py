@@ -8,6 +8,11 @@ from app.auth import protect_page
 PAGES = {
     "V2 上传分析": "app.pages.v2_upload",
     "V2 健康时间轴": "app.pages.v2_timeline",
+    "系统诊断": "app.pages.system_diagnosis",
+}
+
+# 旧版功能暂时隐藏（含 AI识别中心），避免旧模块导入影响 V2 可用性。
+LEGACY_PAGES = {
     "总览": "app.pages.dashboard",
     "人员档案": "app.pages.persons",
     "报告登记": "app.pages.documents",
@@ -15,7 +20,6 @@ PAGES = {
     "健康问题追踪": "app.pages.issues",
     "时间轴": "app.pages.timeline",
     "医生摘要": "app.pages.doctor_summary",
-    "系统诊断": "app.pages.system_diagnosis",
 }
 
 
