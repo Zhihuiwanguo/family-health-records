@@ -1,11 +1,15 @@
 import streamlit as st
+
 from app import db
-from app.services import list_persons
+
+
+def get_persons() -> list[dict]:
+    return db.fetch("persons")
 
 
 def render():
     st.header("报告登记")
-    persons = list_persons()
+    persons = get_persons()
     options = {f"{p['name']} ({p['id']})": p["id"] for p in persons}
     with st.form("doc_form"):
         k = st.selectbox("所属人员", list(options.keys()) if options else [])
