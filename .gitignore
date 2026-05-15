@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Family health records local data
+/data/
+/uploads/
+/exports/
+/backups/
+*.db
+*.pdf
+*.jpg
+*.png
+*.zip
+*.dcm
+.env
+.streamlit/secrets.toml
+.venv/
