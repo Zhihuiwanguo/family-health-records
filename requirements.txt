@@ -5,3 +5,5 @@ pydantic>=2.7.0
 python-dateutil>=2.9.0
 pandas>=2.2.0
 PyPDF2>=3.0.1
+pymupdf>=0
+requests>=0
