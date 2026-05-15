@@ -7,81 +7,79 @@ from typing import Any
 import requests
 
 DEEPSEEK_API_URL = 'https://api.deepseek.com/chat/completions'
-EXPECTED_FIELDS = [
-    'report_type',
-    'report_date',
-    'title',
-    'summary',
-    'abnormal_findings',
-    'risk_level',
-    'suggested_department',
-    'doctor_questions',
-    'follow_up_suggestion',
-    'structured_items',
-]
 
 
 def _empty_result() -> dict[str, Any]:
     return {
         'report_type': '',
         'report_date': '',
-        'title': '',
-        'summary': '',
+        'patient_name': '',
+        'summary_for_family': '',
+        'key_findings': [],
         'abnormal_findings': [],
-        'risk_level': 'unknown',
-        'suggested_department': '',
+        'risk_level_overall': '需医生判断',
+        'suggested_department': [],
         'doctor_questions': [],
         'follow_up_suggestion': '',
+        'health_event_title': '',
+        'health_event_summary': '',
         'structured_items': [],
     }
 
 
-def _normalize_result(raw: dict[str, Any]) -> dict[str, Any]:
+def _normalize_result(raw: dict[str, Any], report_type: str, file_name: str) -> dict[str, Any]:
     result = _empty_result()
-    result.update({k: raw.get(k) for k in EXPECTED_FIELDS if k in raw})
-    if not isinstance(result.get('abnormal_findings'), list):
-        result['abnormal_findings'] = [str(result['abnormal_findings'])] if result.get('abnormal_findings') else []
-    if not isinstance(result.get('doctor_questions'), list):
-        result['doctor_questions'] = [str(result['doctor_questions'])] if result.get('doctor_questions') else []
-    if not isinstance(result.get('structured_items'), list):
-        result['structured_items'] = []
+    result.update(raw or {})
+    result['report_type'] = result.get('report_type') or report_type
+    result['health_event_title'] = result.get('health_event_title') or f"{result['report_type']} - {file_name}"
+    for key in ['key_findings', 'suggested_department', 'doctor_questions', 'structured_items', 'abnormal_findings']:
+        if not isinstance(result.get(key), list):
+            result[key] = [str(result[key])] if result.get(key) else []
     return result
 
 
-def _extract_json_text(content: str) -> str:
-    clean = content.strip()
-    if clean.startswith('```'):
-        clean = clean.strip('`')
-        clean = clean.replace('json\n', '', 1).strip()
-    return clean
-
-
-def _fallback_parse(content: str, file_name: str) -> dict[str, Any]:
+def _fallback_parse(content: str, report_type: str, file_name: str) -> dict[str, Any]:
     result = _empty_result()
-    result['title'] = file_name
-    result['summary'] = content[:1000]
+    result['report_type'] = report_type
+    result['summary_for_family'] = content[:1000]
+    result['health_event_title'] = f'{report_type} - {file_name}'
+    result['health_event_summary'] = content[:500]
     result['raw_response'] = content
     return result
 
 
-def analyze_text(ocr_text: str, file_name: str, person: dict[str, Any]) -> dict[str, Any]:
+def analyze_text(ocr_text: str, file_name: str, person: dict[str, Any], report_type: str) -> dict[str, Any]:
+    if len((ocr_text or '').strip()) < 30:
+        return {'error': '文字内容不足，无法可靠解读'}
+
     api_key = os.getenv('DEEPSEEK_API_KEY')
     if not api_key:
         return {'error': '未配置 DEEPSEEK_API_KEY，请联系管理员配置后再试。', 'missing_api_key': True}
 
+    prompt_focus = f'当前报告类型为「{report_type}」，请结合该类型重点解读异常指标、风险分层和就医准备问题。'
     payload = {
         'model': 'deepseek-chat',
+        'response_format': {'type': 'json_object'},
         'messages': [
-            {'role': 'system', 'content': '你是严谨的医疗文档结构化助手，只输出合法 JSON。'},
+            {
+                'role': 'system',
+                'content': (
+                    '你是家庭健康档案助手。你只能做报告解读和就医准备，不能替代医生诊断，'
+                    '不能输出绝对诊断结论。对癌症、肿瘤、肺结节等高风险内容要谨慎表述，'
+                    '必须使用条件性和建议性表达。输出必须是合法 JSON 对象。'
+                ),
+            },
             {
                 'role': 'user',
                 'content': (
-                    '请根据输入文本输出 JSON，字段必须包含：report_type, report_date, summary, '
-                    'title, abnormal_findings, risk_level, suggested_department, doctor_questions, '
-                    'follow_up_suggestion, structured_items。\n'
+                    '请严格输出以下字段：report_type, report_date, patient_name, summary_for_family, key_findings, '
+                    'abnormal_findings[{item,original_text,value,reference_range,interpretation,risk_level,suggested_action}], '
+                    'risk_level_overall, suggested_department, doctor_questions, follow_up_suggestion, health_event_title, '
+                    'health_event_summary, structured_items。\n'
+                    f'{prompt_focus}\n'
                     f'人员信息: {json.dumps(person, ensure_ascii=False)}\n'
                     f'文件名: {file_name}\n'
-                    f'OCR文本:\n{ocr_text[:12000]}'
+                    f'OCR文本:\n{ocr_text[:14000]}'
                 ),
             },
         ],
@@ -93,18 +91,17 @@ def analyze_text(ocr_text: str, file_name: str, person: dict[str, Any]) -> dict[
             DEEPSEEK_API_URL,
             headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
             json=payload,
-            timeout=90,
+            timeout=120,
         )
         resp.raise_for_status()
         content = resp.json()['choices'][0]['message']['content'].strip()
-        json_text = _extract_json_text(content)
         try:
-            data = json.loads(json_text)
+            data = json.loads(content)
             if not isinstance(data, dict):
                 return {'error': 'DeepSeek 返回非对象 JSON', 'raw_response': content}
-            return _normalize_result(data)
+            return _normalize_result(data, report_type, file_name)
         except json.JSONDecodeError:
-            fallback = _fallback_parse(content, file_name)
+            fallback = _fallback_parse(content, report_type, file_name)
             fallback['error'] = 'DeepSeek 返回内容不是合法 JSON，已使用兜底解析。'
             return fallback
     except Exception as exc:
