@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 from io import BytesIO
 
@@ -41,6 +42,9 @@ ALLOWED_FIELDS = {
         'suggested_action', 'source_text', 'person_name', 'source_file', 'ai_json', 'raw_json',
     },
 }
+DEFAULT_BATCH_SIZE = 20
+ERRNO_11_MAX_RETRIES = 3
+ERRNO_11_SLEEP_SECONDS = 1
 
 
 def _extract_missing_column(err: Exception) -> str | None:
@@ -91,6 +95,21 @@ def _safe_insert(sb, table: str, payload: dict | list[dict]):
                     rows[i] = r
 
 
+def _run_with_retry(action, errno_message: str):
+    retries = 0
+    while True:
+        try:
+            return action()
+        except OSError as exc:
+            if exc.errno == 11 and retries < ERRNO_11_MAX_RETRIES:
+                retries += 1
+                time.sleep(ERRNO_11_SLEEP_SECONDS)
+                continue
+            if exc.errno == 11:
+                raise RuntimeError(errno_message) from exc
+            raise
+
+
 def _load_persons() -> tuple[list[dict], dict[str, dict], dict[str, str]]:
     persons = db.fetch('persons')
     by_label = {f"{p.get('name') or p.get('full_name')} ({p['id']})": p for p in persons}
@@ -108,16 +127,13 @@ def _read_tabular(uploaded_file) -> pd.DataFrame:
 
 def _insert_with_overwrite(sb, person_id: str, report_date: str, file_name: str, report_type: str, summary: str,
                            risk_level: str, department: str, file_info: dict, observations: list[dict], findings: list[dict],
-                           overwrite: bool):
+                           overwrite: bool, batch_size: int = DEFAULT_BATCH_SIZE):
     existing = sb.table('health_files').select('id').eq('person_id', person_id).eq('upload_time', report_date).eq('file_name', file_name).limit(1).execute().data or []
     file_id = None
     if existing:
         file_id = existing[0]['id']
         if not overwrite:
             raise ValueError('已存在同 person_id + report_date + file_name 记录，请勾选“覆盖已存在记录”后重试。')
-        sb.table('health_observations').delete().eq('file_id', file_id).execute()
-        sb.table('health_findings').delete().eq('file_id', file_id).execute()
-        sb.table('health_events').delete().eq('file_id', file_id).execute()
     else:
         inserted = _safe_insert(sb, 'health_files', {
             'person_id': person_id,
@@ -136,12 +152,18 @@ def _insert_with_overwrite(sb, person_id: str, report_date: str, file_name: str,
         raise ValueError('未能获取 file_id，导入中止。')
 
     if existing and overwrite:
-        sb.table('health_files').update({
+        _run_with_retry(lambda: sb.table('health_files').update({
             'file_type': report_type, 'upload_time': report_date, 'ai_summary': summary, 'ai_json': file_info,
             'confirmed': True, 'confirmed_at': datetime.utcnow().isoformat(), 'ai_status': 'done',
-        }).eq('id', file_id).execute()
+        }).eq('id', file_id).execute(), '导入过程中资源临时不可用，请稍后重试或减少单次导入数量。')
 
-    _safe_insert(sb, 'health_events', {
+    if existing and overwrite:
+        # 仅在新数据准备写入前执行删除；非事务模式下仍可能存在中途失败风险，页面会明确提示。
+        _run_with_retry(lambda: sb.table('health_observations').delete().eq('file_id', file_id).execute(), '导入过程中资源临时不可用，请稍后重试或减少单次导入数量。')
+        _run_with_retry(lambda: sb.table('health_findings').delete().eq('file_id', file_id).execute(), '导入过程中资源临时不可用，请稍后重试或减少单次导入数量。')
+        _run_with_retry(lambda: sb.table('health_events').delete().eq('file_id', file_id).execute(), '导入过程中资源临时不可用，请稍后重试或减少单次导入数量。')
+
+    _run_with_retry(lambda: _safe_insert(sb, 'health_events', {
         'person_id': person_id,
         'file_id': file_id,
         'event_date': report_date,
@@ -151,12 +173,28 @@ def _insert_with_overwrite(sb, person_id: str, report_date: str, file_name: str,
         'risk_level': risk_level,
         'department': department,
         'confirmed': True,
-    })
+    }), '导入过程中资源临时不可用，请稍后重试或减少单次导入数量。')
 
     if observations:
-        _safe_insert(sb, 'health_observations', [{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in observations])
+        obs_rows = [{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in observations]
+        obs_total = len(obs_rows)
+        obs_progress = st.progress(0, text=f'health_observations 写入中：0/{obs_total}')
+        for idx in range(0, obs_total, batch_size):
+            batch = obs_rows[idx:idx + batch_size]
+            _run_with_retry(lambda b=batch: _safe_insert(sb, 'health_observations', b), '导入过程中资源临时不可用，请稍后重试或减少单次导入数量。')
+            done = min(idx + batch_size, obs_total)
+            obs_progress.progress(done / obs_total, text=f'health_observations 写入中：{done}/{obs_total}')
+        obs_progress.empty()
     if findings:
-        _safe_insert(sb, 'health_findings', [{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in findings])
+        finding_rows = [{**x, 'person_id': person_id, 'file_id': file_id, 'report_date': report_date, 'report_type': report_type} for x in findings]
+        finding_total = len(finding_rows)
+        finding_progress = st.progress(0, text=f'health_findings 写入中：0/{finding_total}')
+        for idx in range(0, finding_total, batch_size):
+            batch = finding_rows[idx:idx + batch_size]
+            _run_with_retry(lambda b=batch: _safe_insert(sb, 'health_findings', b), '导入过程中资源临时不可用，请稍后重试或减少单次导入数量。')
+            done = min(idx + batch_size, finding_total)
+            finding_progress.progress(done / finding_total, text=f'health_findings 写入中：{done}/{finding_total}')
+        finding_progress.empty()
 
 
 def render() -> None:
@@ -174,11 +212,19 @@ def render() -> None:
         return
 
     st.subheader('2) JSON 导入')
+    uploaded_json = st.file_uploader('上传 JSON 文件（可选，优先于粘贴内容）', type=['json'], key='upload_json')
     json_text = st.text_area('粘贴 ChatGPT 生成的 JSON', height=220)
     overwrite_json = st.checkbox('覆盖已存在记录（person_id + report_date + file_name）', key='ov_json')
+    st.caption('提示：当前覆盖导入不使用数据库事务。若中途失败，请重试导入以恢复完整数据。')
+
+    def _read_json_payload() -> dict:
+        if uploaded_json is not None:
+            return json.loads(uploaded_json.getvalue().decode('utf-8'))
+        return json.loads(json_text)
+
     if st.button('预览 JSON', key='preview_json'):
         try:
-            payload = json.loads(json_text)
+            payload = _read_json_payload()
             file_info = payload.get('file_info') or {}
             st.session_state['v2_json_payload'] = payload
             file_preview = _prepare_record('health_files', {
@@ -191,18 +237,35 @@ def render() -> None:
             })
             obs_preview = [_prepare_record('health_observations', x) for x in (payload.get('observations') or [])]
             finding_preview = [_prepare_record('health_findings', x) for x in (payload.get('findings') or [])]
-            st.caption('health_files 入库预览（已按白名单过滤，多余字段保存到 ai_json/raw_json）')
+            events_count = len(payload.get('events') or [])
+            st.caption('导入摘要')
+            st.write({
+                'file_info': {
+                    'person_name': file_info.get('person_name'),
+                    'report_date': file_info.get('report_date'),
+                    'report_type': file_info.get('report_type'),
+                    'file_name': file_info.get('file_name'),
+                },
+                'observations_count': len(obs_preview),
+                'findings_count': len(finding_preview),
+                'events_count': events_count,
+            })
+            st.caption('health_files 入库预览（白名单过滤后）')
             st.dataframe(pd.DataFrame([file_preview]), use_container_width=True)
-            st.caption('health_observations 入库预览')
-            st.dataframe(pd.DataFrame(obs_preview), use_container_width=True)
-            st.caption('health_findings 入库预览')
-            st.dataframe(pd.DataFrame(finding_preview), use_container_width=True)
+            st.caption('仅预览前 10 行（默认非编辑模式）')
+            preview_obs_df = pd.DataFrame(obs_preview[:10])
+            preview_finding_df = pd.DataFrame(finding_preview[:10])
+            st.dataframe(preview_obs_df, use_container_width=True)
+            st.dataframe(preview_finding_df, use_container_width=True)
+            if st.checkbox('展开完整预览', key='expand_full_preview'):
+                st.dataframe(pd.DataFrame(obs_preview), use_container_width=True)
+                st.dataframe(pd.DataFrame(finding_preview), use_container_width=True)
         except Exception as exc:
             st.error(f'JSON 解析失败: {exc}')
 
     if st.button('确认导入 JSON', type='primary'):
         try:
-            payload = st.session_state.get('v2_json_payload') or json.loads(json_text)
+            payload = st.session_state.get('v2_json_payload') or _read_json_payload()
             file_info = payload.get('file_info') or {}
             person_id = selected_person['id']
             report_date = file_info.get('report_date')
@@ -211,9 +274,15 @@ def render() -> None:
             summary = file_info.get('summary') or ''
             risk_level = file_info.get('risk_level') or ''
             department = ','.join(file_info.get('suggested_department') or [])
+            existing = get_supabase().table('health_files').select('id').eq('person_id', person_id).eq('upload_time', report_date).eq('file_name', file_name).limit(1).execute().data or []
+            if existing and not overwrite_json:
+                st.warning('检测到相同 person_name + report_date + file_name 记录，勾选“覆盖已存在记录”后可继续。')
+                return
             _insert_with_overwrite(get_supabase(), person_id, report_date, file_name, report_type, summary, risk_level, department, file_info,
-                                   payload.get('observations') or [], payload.get('findings') or [], overwrite_json)
+                                   payload.get('observations') or [], payload.get('findings') or [], overwrite_json, DEFAULT_BATCH_SIZE)
             st.success('JSON 导入成功。')
+        except RuntimeError as exc:
+            st.error(str(exc))
         except Exception as exc:
             st.error(f'JSON 导入失败: {exc}')
 
